@@ -19,9 +19,9 @@ import os
 from robot.errors import DataError
 from robot.libraries import STDLIBS
 from robot.output import LOGGER
-from robot.utils import (getdoc, get_error_details, Importer, is_java_init,
+from robot.utils import (getdoc, get_error_details, Importer, is_init,
                          is_java_method, JYTHON, normalize, seq2str2, unic,
-                         is_list_like, PY2, PYPY, type_name)
+                         is_list_like, py3to2, type_name)
 
 from .arguments import EmbeddedArguments
 from .context import EXECUTION_CONTEXTS
@@ -46,7 +46,7 @@ def TestLibrary(name, args=None, variables=None, create_handlers=True,
     else:
         import_name = name
     with OutputCapturer(library_import=True):
-        importer = Importer('test library')
+        importer = Importer('library', logger=LOGGER)
         libcode, source = importer.import_class_or_module(import_name,
                                                           return_source=True)
     libclass = _get_lib_class(libcode)
@@ -67,6 +67,7 @@ def _get_lib_class(libcode):
     return _ClassLibrary
 
 
+@py3to2
 class _BaseTestLibrary(object):
     get_handler_error_level = 'INFO'
 
@@ -92,6 +93,9 @@ class _BaseTestLibrary(object):
     def __len__(self):
         return len(self.handlers)
 
+    def __bool__(self):
+        return bool(self.handlers) or self.has_listener
+
     @property
     def doc(self):
         if self._doc is None:
@@ -103,9 +107,13 @@ class _BaseTestLibrary(object):
         if inspect.ismodule(self._libcode):
             return 1
         try:
-            return inspect.getsourcelines(self._libcode)[1]
+            lines, start_lineno = inspect.getsourcelines(self._libcode)
         except (TypeError, OSError, IOError):
             return -1
+        for increment, line in enumerate(lines):
+            if line.strip().startswith('class '):
+                return start_lineno + increment
+        return start_lineno
 
     def create_handlers(self):
         self._create_handlers(self.get_instance())
@@ -153,19 +161,7 @@ class _BaseTestLibrary(object):
 
     def _resolve_init_method(self, libcode):
         init = getattr(libcode, '__init__', None)
-        return init if self._valid_init(init) else None
-
-    def _valid_init(self, method):
-        if not method:
-            return False
-        # https://bitbucket.org/pypy/pypy/issues/2462/
-        if PYPY:
-            if PY2:
-                return method.__func__ is not object.__init__.__func__
-            return method is not object.__init__
-        return (inspect.ismethod(method) or     # PY2
-                inspect.isfunction(method) or   # PY3
-                is_java_init(method))
+        return init if is_init(init) else None
 
     def reset_instance(self, instance=None):
         prev = self._libinst
@@ -333,7 +329,7 @@ class _BaseTestLibrary(object):
             args_text = 'arguments %s' % seq2str2(args)
         else:
             args_text = 'no arguments'
-        raise DataError("Initializing test library '%s' with %s failed: %s\n%s"
+        raise DataError("Initializing library '%s' with %s failed: %s\n%s"
                         % (self.name, args_text, msg, details))
 
 

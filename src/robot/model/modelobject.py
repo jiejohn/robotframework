@@ -15,12 +15,25 @@
 
 import copy
 
-from robot.utils import SetterAwareType, py2to3, unicode, with_metaclass
+from robot.utils import py3to2, SetterAwareType, with_metaclass
 
 
-@py2to3
+@py3to2
 class ModelObject(with_metaclass(SetterAwareType, object)):
+    repr_args = ('name',)
     __slots__ = []
+
+    def config(self, **attributes):
+        """Configure model object with given attributes.
+
+        ``obj.config(name='Example', doc='Something')`` is equivalent to setting
+        ``obj.name = 'Example'`` and ``obj.doc = 'Something'``.
+
+        New in Robot Framework 4.0.
+        """
+        for name in attributes:
+            setattr(self, name, attributes[name])
+        return self
 
     def copy(self, **attributes):
         """Return shallow copy of this object.
@@ -56,11 +69,9 @@ class ModelObject(with_metaclass(SetterAwareType, object)):
             setattr(copied, name, attributes[name])
         return copied
 
-    def __unicode__(self):
-        return self.name
-
     def __repr__(self):
-        return repr(unicode(self))
+        args = ['%s=%r' % (n, getattr(self, n)) for n in self.repr_args]
+        return '%s(%s)' % (type(self).__name__, ', '.join(args))
 
     def __setstate__(self, state):
         """Customize attribute updating when using the `copy` module.

@@ -33,9 +33,11 @@ __ http://robotframework.org/robotframework/latest/RobotFrameworkUserGuide.html#
 """
 
 from itertools import chain
+import warnings
 
-from robot.model import TotalStatisticsBuilder, Criticality
-from robot import model, utils
+from robot import model
+from robot.model import TotalStatisticsBuilder, Keywords
+from robot.utils import get_elapsed_time, setter
 
 from .configurer import SuiteConfigurer
 from .messagefilter import MessageFilter
@@ -44,37 +46,44 @@ from .suiteteardownfailed import (SuiteTeardownFailureHandler,
                                   SuiteTeardownFailed)
 
 
-# TODO: Should remove model.Message altogether and just implement the whole
-# thing here. Additionally model.Keyword should not have `message_class` at
-# all or it should be None.
+class Body(model.Body):
+    __slots__ = []
+    message_class = None
 
+    def create_message(self, *args, **kwargs):
+        return self.append(self.message_class(*args, **kwargs))
+
+    def filter(self, keywords=None, fors=None, ifs=None, messages=None, predicate=None):
+        return self._filter([(self.keyword_class, keywords),
+                             (self.for_class, fors),
+                             (self.if_class, ifs),
+                             (self.message_class, messages)], predicate)
+
+
+@Body.register
 class Message(model.Message):
-    """Represents a single log message.
-
-    See the base class for documentation of attributes not documented here.
-    """
     __slots__ = []
 
 
+@Body.register
 class Keyword(model.Keyword):
     """Represents results of a single keyword.
 
     See the base class for documentation of attributes not documented here.
     """
-    __slots__ = ['kwname', 'libname', 'status', 'starttime', 'endtime', 'message']
-    message_class = Message
+    __slots__ = ['kwname', 'libname', 'status', 'starttime', 'endtime', 'message',
+                 'lineno', 'source']
 
-    def __init__(self, kwname='', libname='', doc='', args=(), assign=(),
-                 tags=(), timeout=None, type='kw',  status='FAIL',
-                 starttime=None, endtime=None):
-        model.Keyword.__init__(self, '', doc, args, assign, tags, timeout, type)
+    def __init__(self, kwname='', libname='', doc='', args=(), assign=(), tags=(),
+                 timeout=None, type='kw', status='FAIL', starttime=None, endtime=None,
+                 parent=None, lineno=None, source=None):
+        model.Keyword.__init__(self, None, doc, args, assign, tags, timeout, type, parent)
         #: Name of the keyword without library or resource name.
-        self.kwname = kwname or ''
+        self.kwname = kwname
         #: Name of the library or resource containing this keyword.
-        self.libname = libname or ''
-        #: Execution status as a string. Typically ``PASS`` or ``FAIL``, but
-        #: library keywords have status ``NOT_RUN`` in the dry-ryn mode.
-        #: See also :attr:`passed`.
+        self.libname = libname
+        #: Execution status as a string. Typically ``PASS``, ``FAIL`` or ``SKIP``,
+        #: but library keywords have status ``NOT_RUN`` in the dry-ryn mode.
         self.status = status
         #: Keyword execution start time in format ``%Y%m%d %H:%M:%S.%f``.
         self.starttime = starttime
@@ -82,11 +91,51 @@ class Keyword(model.Keyword):
         self.endtime = endtime
         #: Keyword status message. Used only if suite teardowns fails.
         self.message = ''
+        self.lineno = lineno
+        self.source = source
+        self.body = None
+
+    @setter
+    def body(self, body):
+        """Child keywords and messages as a :class:`~.Body` object."""
+        return Body(self, body)
+
+    @property
+    def keywords(self):
+        """Deprecated since Robot Framework 4.0.
+
+        Use :attr:`body` or :attr:`teardown` instead.
+        """
+        keywords = self.body.filter(messages=False)
+        if self.teardown:
+            keywords.append(self.teardown)
+        return Keywords(self, keywords)
+
+    @keywords.setter
+    def keywords(self, keywords):
+        Keywords.raise_deprecation_error()
+
+    @property
+    def messages(self):
+        """Keyword's messages.
+
+        Starting from Robot Framework 4.0 this is a list generated from messages
+        in :attr:`body`.
+        """
+        return self.body.filter(messages=True)
+
+    @property
+    def children(self):
+        """List of child keywords and messages in creation order.
+
+        Deprecated since Robot Framework 4.0. Use :att:`body` instead.
+        """
+        return list(self.body)
 
     @property
     def elapsedtime(self):
         """Total execution time in milliseconds."""
-        return utils.get_elapsed_time(self.starttime, self.endtime)
+        return get_elapsed_time(self.starttime, self.endtime)
 
     @property
     def name(self):
@@ -103,14 +152,46 @@ class Keyword(model.Keyword):
             return self.kwname
         return '%s.%s' % (self.libname, self.kwname)
 
+    @name.setter
+    def name(self, name):
+        if name is not None:
+            raise AttributeError("Cannot set 'name' attribute directly. "
+                                 "Set 'kwname' and 'libname' separately instead.")
+        self.kwname = None
+        self.libname = None
+
     @property
     def passed(self):
-        """``True`` or ``False`` depending on the :attr:`status`."""
+        """``True`` when :attr:`status` is 'PASS', ``False`` otherwise."""
         return self.status == 'PASS'
 
     @passed.setter
     def passed(self, passed):
         self.status = 'PASS' if passed else 'FAIL'
+
+    @property
+    def failed(self):
+        """``True`` when :attr:`status` is 'FAIL', ``False`` otherwise."""
+        return self.status == 'FAIL'
+
+    @failed.setter
+    def failed(self, failed):
+        self.status = 'FAIL' if failed else 'PASS'
+
+    @property
+    def skipped(self):
+        """``True`` when :attr:`status` is 'SKIP', ``False`` otherwise.
+
+        Setting to ``False`` value is ambiguous and raises an exception.
+        """
+        return self.status == 'SKIP'
+
+    @skipped.setter
+    def skipped(self, skipped):
+        if not skipped:
+            raise ValueError("`skipped` value must be truthy, got '%s'."
+                             % skipped)
+        self.status = 'SKIP'
 
 
 class TestCase(model.TestCase):
@@ -119,7 +200,8 @@ class TestCase(model.TestCase):
     See the base class for documentation of attributes not documented here.
     """
     __slots__ = ['status', 'message', 'starttime', 'endtime']
-    keyword_class = Keyword
+    body_class = Body
+    fixture_class = Keyword
 
     def __init__(self, name='', doc='', tags=None, timeout=None, status='FAIL',
                  message='', starttime=None, endtime=None):
@@ -137,11 +219,11 @@ class TestCase(model.TestCase):
     @property
     def elapsedtime(self):
         """Total execution time in milliseconds."""
-        return utils.get_elapsed_time(self.starttime, self.endtime)
+        return get_elapsed_time(self.starttime, self.endtime)
 
     @property
     def passed(self):
-        """``True/False`` depending on the :attr:`status`."""
+        """``True`` when :attr:`status` is 'PASS', ``False`` otherwise."""
         return self.status == 'PASS'
 
     @passed.setter
@@ -149,15 +231,35 @@ class TestCase(model.TestCase):
         self.status = 'PASS' if passed else 'FAIL'
 
     @property
-    def critical(self):
-        """``True/False`` depending on is the test considered critical.
+    def failed(self):
+        """``True`` when :attr:`status` is 'FAIL', ``False`` otherwise."""
+        return self.status == 'FAIL'
 
-        Criticality is determined based on test's :attr:`tags` and
-        :attr:`~TestSuite.criticality` of the :attr:`parent` suite.
+    @failed.setter
+    def failed(self, failed):
+        self.status = 'FAIL' if failed else 'PASS'
+
+    @property
+    def skipped(self):
+        """``True`` when :attr:`status` is 'SKIP', ``False`` otherwise.
+
+        Setting to ``False`` value is ambiguous and raises an exception.
         """
-        if not self.parent:
-            return True
-        return self.parent.criticality.test_is_critical(self)
+        return self.status == 'SKIP'
+
+    @skipped.setter
+    def skipped(self, skipped):
+        if not skipped:
+            raise ValueError("`skipped` value must be truthy, got '%s'."
+                             % skipped)
+        self.status = 'SKIP'
+
+    @property
+    def critical(self):
+        warnings.warn("'TestCase.criticality' has been deprecated and always "
+                      " returns 'True'.",
+                      UserWarning)
+        return True
 
 
 class TestSuite(model.TestSuite):
@@ -165,9 +267,9 @@ class TestSuite(model.TestSuite):
 
     See the base class for documentation of attributes not documented here.
     """
-    __slots__ = ['message', 'starttime', 'endtime', '_criticality']
+    __slots__ = ['message', 'starttime', 'endtime']
     test_class = TestCase
-    keyword_class = Keyword
+    fixture_class = Keyword
 
     def __init__(self, name='', doc='', metadata=None, source=None,
                  message='', starttime=None, endtime=None, rpa=False):
@@ -178,17 +280,37 @@ class TestSuite(model.TestSuite):
         self.starttime = starttime
         #: Suite execution end time in format ``%Y%m%d %H:%M:%S.%f``.
         self.endtime = endtime
-        self._criticality = None
 
     @property
     def passed(self):
-        """``True`` if no critical test has failed, ``False`` otherwise."""
-        return not self.statistics.critical.failed
+        """``True`` if no test has failed but some have passed, ``False`` otherwise."""
+        return self.status == 'PASS'
+
+    @property
+    def failed(self):
+        """``True`` if any test has failed, ``False`` otherwise."""
+        return self.status == 'FAIL'
+
+    @property
+    def skipped(self):
+        """``True`` if there are no passed or failed tests, ``False`` otherwise."""
+        return self.status == 'SKIP'
 
     @property
     def status(self):
-        """``'PASS'`` if no critical test has failed, ``'FAIL'`` otherwise."""
-        return 'PASS' if self.passed else 'FAIL'
+        """'PASS', 'FAIL' or 'SKIP' depending on test statuses.
+
+        - If any test has failed, status is 'FAIL'.
+        - If no test has failed but at least some test has passed, status is 'PASS'.
+        - If there are no failed or passed tests, status is 'SKIP'. This covers both
+          the case when all tests have been skipped and when there are no tests.
+        """
+        stats = self.statistics  # Local variable avoids recreating stats.
+        if stats.failed:
+            return 'FAIL'
+        if stats.passed:
+            return 'PASS'
+        return 'SKIP'
 
     @property
     def statistics(self):
@@ -198,8 +320,8 @@ class TestSuite(model.TestSuite):
         to a variable and inspecting it is often a good idea::
 
             stats = suite.statistics
-            print(stats.critical.failed)
-            print(stats.all.total)
+            print(stats.failed)
+            print(stats.total)
             print(stats.message)
         """
         return TotalStatisticsBuilder(self, self.rpa).stats
@@ -220,41 +342,9 @@ class TestSuite(model.TestSuite):
     def elapsedtime(self):
         """Total execution time in milliseconds."""
         if self.starttime and self.endtime:
-            return utils.get_elapsed_time(self.starttime, self.endtime)
+            return get_elapsed_time(self.starttime, self.endtime)
         return sum(child.elapsedtime for child in
-                   chain(self.suites, self.tests, self.keywords))
-
-    @property
-    def criticality(self):
-        """Used by tests to determine are they considered critical or not.
-
-        Normally configured using ``--critical`` and ``--noncritical``
-        command line options. Can be set programmatically using
-        :meth:`set_criticality` of the root test suite.
-        """
-        if self.parent:
-            return self.parent.criticality
-        if self._criticality is None:
-            self.set_criticality()
-        return self._criticality
-
-    def set_criticality(self, critical_tags=None, non_critical_tags=None):
-        """Sets which tags are considered critical and which non-critical.
-
-        :param critical_tags: Tags or patterns considered critical. See
-            the documentation of the ``--critical`` option for more details.
-        :param non_critical_tags: Tags or patterns considered non-critical. See
-            the documentation of the ``--noncritical`` option for more details.
-
-        Tags can be given as lists of strings or, when giving only one,
-        as single strings. This information is used by tests to determine
-        are they considered critical or not.
-
-        Criticality can be set only to the root test suite.
-        """
-        if self.parent is not None:
-            raise ValueError('Criticality can only be set to the root suite.')
-        self._criticality = Criticality(critical_tags, non_critical_tags)
+                   chain(self.suites, self.tests, (self.setup, self.teardown)))
 
     def remove_keywords(self, how):
         """Remove keywords based on the given condition.
@@ -283,7 +373,6 @@ class TestSuite(model.TestSuite):
         Example::
 
             suite.configure(remove_keywords='PASSED',
-                            critical_tags='smoke',
                             doc='Smoke test results.')
         """
         model.TestSuite.configure(self)    # Parent validates call is allowed.
@@ -293,6 +382,10 @@ class TestSuite(model.TestSuite):
         """Internal usage only."""
         self.visit(SuiteTeardownFailureHandler())
 
-    def suite_teardown_failed(self, message):
+    def suite_teardown_failed(self, error):
         """Internal usage only."""
-        self.visit(SuiteTeardownFailed(message))
+        self.visit(SuiteTeardownFailed(error))
+
+    def suite_teardown_skipped(self, message):
+        """Internal usage only."""
+        self.visit(SuiteTeardownFailed(message, skipped=True))

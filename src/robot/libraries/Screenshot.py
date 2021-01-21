@@ -46,7 +46,7 @@ else:
 from robot.api import logger
 from robot.libraries.BuiltIn import BuiltIn
 from robot.version import get_version
-from robot.utils import abspath, get_error_message, get_link_path, py2to3
+from robot.utils import abspath, get_error_message, get_link_path, py3to2
 
 
 class Screenshot(object):
@@ -250,7 +250,7 @@ class Screenshot(object):
                     % (link, path), html=True)
 
 
-@py2to3
+@py3to2
 class ScreenshotTaker(object):
 
     def __init__(self, module_name=None):
@@ -260,7 +260,7 @@ class ScreenshotTaker(object):
     def __call__(self, path):
         self._screenshot(path)
 
-    def __nonzero__(self):
+    def __bool__(self):
         return self.module != 'no'
 
     def test(self, path=None):
@@ -349,6 +349,8 @@ class ScreenshotTaker(object):
         if not path.endswith(('.jpg', '.jpeg')):
             raise RuntimeError("Scrot requires extension to be '.jpg' or "
                                "'.jpeg', got '%s'." % os.path.splitext(path)[1])
+        if os.path.exists(path):
+            os.remove(path)
         if self._call('scrot', '--silent', path) != 0:
             raise RuntimeError("Using 'scrot' failed.")
 

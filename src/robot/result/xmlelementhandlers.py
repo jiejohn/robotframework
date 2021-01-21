@@ -117,9 +117,18 @@ class KeywordHandler(_Handler):
     tag = 'kw'
 
     def start(self, elem, result):
-        return result.keywords.create(kwname=elem.get('name', ''),
-                                      libname=elem.get('library', ''),
-                                      type=elem.get('type', 'kw'))
+        type_ = elem.get('type', 'kw')
+        if type_ == 'setup':
+            return result.setup.config(kwname=elem.get('name', ''),
+                                       libname=elem.get('library', ''),
+                                       type=type_)
+        elif type_ == 'teardown':
+            return result.teardown.config(kwname=elem.get('name', ''),
+                                          libname=elem.get('library', ''),
+                                          type=type_)
+        return result.body.create_keyword(kwname=elem.get('name', ''),
+                                          libname=elem.get('library', ''),
+                                          type=elem.get('type', 'kw'))
 
     def _children(self):
         return [DocHandler(), ArgumentsHandler(), AssignHandler(),
@@ -131,10 +140,10 @@ class MessageHandler(_Handler):
     tag = 'msg'
 
     def end(self, elem, result):
-        result.messages.create(elem.text or '',
-                               elem.get('level', 'INFO'),
-                               elem.get('html', 'no') == 'yes',
-                               self._timestamp(elem, 'timestamp'))
+        result.body.create_message(elem.text or '',
+                                   elem.get('level', 'INFO'),
+                                   elem.get('html', 'no') == 'yes',
+                                   self._timestamp(elem, 'timestamp'))
 
 
 class _StatusHandler(_Handler):
@@ -252,7 +261,17 @@ class ErrorsHandler(_Handler):
         return result.errors
 
     def _children(self):
-        return [MessageHandler()]
+        return [ErrorMessageHandler()]
+
+
+class ErrorMessageHandler(_Handler):
+    tag = 'msg'
+
+    def end(self, elem, result):
+        result.messages.create(elem.text or '',
+                               elem.get('level', 'INFO'),
+                               elem.get('html', 'no') == 'yes',
+                               self._timestamp(elem, 'timestamp'))
 
 
 class StatisticsHandler(_Handler):

@@ -9,7 +9,7 @@ function toggleTest(testId) {
 }
 
 function toggleKeyword(kwId) {
-    toggleElement(kwId, ['keyword', 'message']);
+    toggleElement(kwId, ['keyword']);
 }
 
 function toggleElement(elementId, childrenNames) {
@@ -34,9 +34,8 @@ function drawCallback(element, childElement, childrenNames) {
     return function () {
         util.map(childrenNames, function (childName) {
             var children = element[childName + 's']();
-            var template = childName + 'Template';
             util.map(children, function (child) {
-                $.tmpl(template, child).appendTo(childElement);
+                $.tmpl(child.template, child).appendTo(childElement);
             });
         });
     }
@@ -46,14 +45,21 @@ function expandSuite(suite) {
     if (suite.status == "PASS")
         expandElement(suite);
     else
-        expandCriticalFailed(suite);
+        expandFailed(suite);
 }
 
-function expandElement(item) {
+function expandElement(item, retryCount) {
+    retryCount = typeof retryCount !== 'undefined' ? retryCount : 3;
     var element = $('#' + item.id);
     var children = element.children('.children');
     // .css is faster than .show and .show w/ callback is terribly slow
     children.css({'display': 'block'});
+    // in rare cases on large logs concurrent expanding fails => retry
+    if (children.css('display') != 'block' && retryCount > 0) {
+        console.debug('expandElement '+item.id+' failed! planning retry...');
+        setTimeout(function() { expandElement(item, retryCount-1); }, 0);
+        return;
+    }
     populateChildren(item.id, children, item.childrenNames);
     element.children('.element-header').removeClass('closed');
 }
@@ -72,11 +78,11 @@ function loadAndExpandElementIds(ids) {
     }
 }
 
-function expandCriticalFailed(element) {
+function expandFailed(element) {
     if (element.status == "FAIL") {
         window.elementsToExpand = [element];
         window.expandDecider = function (e) {
-            return e.status == "FAIL" && (e.isCritical === undefined || e.isCritical);
+            return e.status == "FAIL";
         };
         expandRecursively();
     }
